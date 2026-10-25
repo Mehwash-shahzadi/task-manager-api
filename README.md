@@ -10,6 +10,7 @@ A RESTful API for managing tasks, built with **FastAPI**, **SQLModel**, **Postgr
 - [Getting Started with Docker](#getting-started-with-docker)
 - [Running Locally](#running-locally)
 - [API Reference](#api-reference)
+- [Error Handling and Logging](#error-handling-and-logging)
 - [Database Migrations](#database-migrations)
 - [Project Structure](#project-structure)
 
@@ -17,9 +18,12 @@ A RESTful API for managing tasks, built with **FastAPI**, **SQLModel**, **Postgr
 
 - Full CRUD operations for tasks
 - Reusable `BaseTable` model (`id`, `created_at`, `updated_at`) and a single `TaskStatus` enum
-- Consistent `ApiResponse` format for every response, including errors
+- Consistent `ApiResponse` format for every response, including errors, built with the `ok()` and `fail()` helpers
 - Redis caching for `GET /tasks` and `GET /tasks/{id}`, invalidated on create, update and delete
+- Graceful degradation: if Redis is unavailable the API falls back to the database and logs a warning
 - `GET /cache` endpoint to inspect cached keys (uses `SCAN`, limited to the `tasks:` prefix)
+- Request logging and timing middleware (`X-Process-Time` response header)
+- Centralized exception handlers: unexpected errors are logged once with a full traceback
 - Alembic migrations generated from the models and applied automatically in Docker
 
 ## Tech Stack
@@ -180,6 +184,8 @@ Errors return the appropriate HTTP status: `404` (not found), `422` (validation 
 { "success": false, "message": "Task not found", "data": null, "errors": ["Task not found"] }
 ```
 
+Every response includes an `X-Process-Time` header with the request duration in seconds.
+
 ### Task status
 
 `status` is one of `pending` (default), `in_progress` or `done`.
@@ -190,6 +196,27 @@ Errors return the appropriate HTTP status: `404` (not found), `422` (validation 
 curl -X POST localhost:8010/tasks -H 'content-type: application/json' \
   -d '{"title": "Write docs", "status": "in_progress"}'
 ```
+
+## Error Handling and Logging
+
+Logging is configured once in `app/main.py` (`logging.basicConfig`); every module uses `logging.getLogger(__name__)` and shares that format.
+
+| Layer | File | Responsibility |
+|---|---|---|
+| Middleware | `app/middleware.py` | Adds `X-Process-Time` and logs one line per request: method, path, status, duration |
+| Exception handlers | `app/exceptions.py` | Convert errors into the `ApiResponse` format and log unexpected errors |
+
+```
+Request
+  -> log_requests / add_process_time_header   (middleware.py)
+  -> router endpoint
+       |- success ................ 200/201 response, logged as INFO
+       |- HTTPException (404) .... http_exception_handler        -> JSON 404
+       |- validation error ....... validation_exception_handler  -> JSON 422
+       `- unexpected error ....... general_exception_handler     -> logged with traceback (ERROR) -> JSON 500
+```
+
+Unexpected errors are logged in one place only, `general_exception_handler`, so each failure produces a single traceback in the logs. Clients receive a generic `Internal server error` message and never see internal details.
 
 ## Database Migrations
 
@@ -206,14 +233,15 @@ Always review the generated migration file before committing it.
 
 ```
 app/
-  main.py          application, routers and exception handlers
+  main.py          application, logging config, middleware, routers and exception handlers
   config.py        settings loaded from the environment
   database.py      engine and session dependency
-  cache.py         Redis helpers (get / set / invalidate)
+  cache.py         Redis helpers (get / set / invalidate / list), Redis-failure safe
   enums.py         TaskStatus enum
   exceptions.py    global error handlers
+  middleware.py    request timing and request logging
   models/          BaseTable, Task
-  schemas/         ApiResponse, TaskCreate/Update/Read, CacheEntry
+  schemas/         ApiResponse with ok() / fail() helpers, TaskCreate/Update/Read, CacheEntry
   routers/         tasks, cache
 alembic/           database migrations
 ```

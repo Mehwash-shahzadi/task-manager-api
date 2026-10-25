@@ -15,12 +15,7 @@ async def add_process_time_header(request: Request, call_next):
 
 
 async def log_requests(request: Request, call_next):
-    try:
-        response = await call_next(request)
-    except Exception:
-        # The global Exception handler runs outside middleware, so log here and re-raise
-        logger.exception("%s %s 500", request.method, request.url.path)
-        raise
+    response = await call_next(request)
 
     process_time = response.headers.get("X-Process-Time", "n/a")
     logger.info(

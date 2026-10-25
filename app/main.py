@@ -11,7 +11,7 @@ from app.exceptions import (
 )
 from app.middleware import add_process_time_header, log_requests
 from app.routers import cache, tasks
-
+#logging ka common format set karti hai. Middleware aur exception handlers messages bhejte hain. Logging system un messages ko configured format mein terminal par dikhata hai.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
