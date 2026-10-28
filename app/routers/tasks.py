@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 
 from app.cache import LIST_KEY, cache_get, cache_invalidate, cache_set, task_key
 from app.database import get_session
+from app.events import add_to_outbox
 from app.models.task import Task
 from app.schemas.task import TaskCreate, TaskUpdate, TaskRead
 from app.schemas.response import ApiResponse, ok
@@ -39,6 +40,8 @@ def create_task(task_data: TaskCreate, session: SessionDep):
     task = Task.model_validate(task_data)
 
     session.add(task)
+    session.flush()
+    add_to_outbox(session, "task.created", TaskRead.model_validate(task).model_dump(mode="json"))
     session.commit()
     session.refresh(task)
     cache_invalidate(LIST_KEY)
@@ -83,7 +86,7 @@ def update_task(
 
     update_data = task_data.model_dump(exclude_unset=True)
 
-    # These two fields cannot be null in the database.
+    # ye dono fields database mein null nahi ho sakti
     if update_data.get("title", "valid") is None:
         raise HTTPException(
             status_code=422,

@@ -1,7 +1,7 @@
 from typing import Generic, TypeVar
 from pydantic import BaseModel
 
-# TypeVar creates a reusable type placeholder that can represent different data types.
+# TypeVar ek dobara use hone wala type placeholder banata h jo alag alag data types ki jagah le sakta h
 DataT = TypeVar("DataT")
 
 

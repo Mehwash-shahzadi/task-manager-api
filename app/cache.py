@@ -9,7 +9,13 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-redis_client = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+# timeout is liye h k Redis atak jaye to requests na latken; connection refuse ho to wo pehle hi jaldi fail ho jata h
+redis_client = Redis.from_url(
+    settings.REDIS_URL,
+    decode_responses=True,
+    socket_timeout=settings.REDIS_TIMEOUT,
+    socket_connect_timeout=settings.REDIS_TIMEOUT,
+)
 
 PREFIX = "tasks:"
 LIST_KEY = f"{PREFIX}list"
@@ -19,7 +25,7 @@ def task_key(id: UUID) -> str:
     return f"{PREFIX}{id}"
 
 
-# If Redis is down, the API falls back to the database.
+# Redis band ho to API seedha database se data le leti h
 def cache_get(key: str) -> Any | None:
     try:
         value = redis_client.get(key)
@@ -47,10 +53,10 @@ def cache_list() -> list[dict[str, Any]]:
     entries = []
 
     try:
-        # scan_iter uses SCAN, not KEYS, and the prefix keeps it to this app's keys
+        # scan_iter SCAN use karta h KEYS nahi, aur prefix ki wajah se sirf is app ki keys aati hain
         for key in redis_client.scan_iter(match=f"{PREFIX}*"):
             value = redis_client.get(key)
-            if value is None:  # expired between SCAN and GET
+            if value is None:  # SCAN aur GET ke beech mein expire ho gayi
                 continue
             entries.append(
                 {"key": key, "ttl": redis_client.ttl(key), "value": json.loads(value)}

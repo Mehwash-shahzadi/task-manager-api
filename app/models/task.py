@@ -5,4 +5,4 @@ from app.enums import TaskStatus
 class Task(BaseTable, table=True):
     title: str
     description: str | None = None
-    status: TaskStatus = Field(default=TaskStatus.PENDING)# Field is used to define extra settings or constraints for a model field.
+    status: TaskStatus = Field(default=TaskStatus.PENDING)# Field se model ke field par extra settings ya constraints lagate hain
