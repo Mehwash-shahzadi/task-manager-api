@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     OUTBOX_RETENTION_DAYS: int = 7
     # Optional: agar ye khali h to tests DATABASE_URL use karte hain, bas database ka naam "tasks_test" rakh kar
     TEST_DATABASE_URL: str = ""
+    CONSUMER_GROUP	: str="task-workers"
+    CONSUMER_BLOCK_MS: int=5000#Naye event ke liye kitni der wait karna hai?
+    CONSUMER_BATCH_SIZE: int=10#Ek read mein kitne events maangne hain
+    CONSUMER_SEEN_TTL_SECONDS: int=86400
+    CONSUMER_MIN_IDLE_MS: int = 60000
+    CONSUMER_MAX_DELIVERIES: int = 3
 
 
 

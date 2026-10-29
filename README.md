@@ -25,6 +25,7 @@ A RESTful API for managing tasks, built with **FastAPI**, **SQLModel**, **Postgr
 - Graceful degradation: if Redis is unavailable the API falls back to the database and logs a warning
 - `GET /cache` endpoint to inspect cached keys (uses `SCAN`, limited to the `tasks:` prefix)
 - `task.created` event written to an outbox table in the same transaction as the task, then sent to a Redis Stream by a background relay with retry, so events are not lost when Redis is down
+- A separate worker process reads `task.created` events from the stream through a Redis consumer group, skips duplicates, retries failures and moves broken events to a dead-letter stream
 - Request logging and timing middleware (`X-Process-Time` response header)
 - Centralized exception handlers: unexpected errors are logged once with a full traceback
 - Alembic migrations generated from the models and applied automatically in Docker
@@ -62,6 +63,12 @@ cp .env.example .env
 | `OUTBOX_MAX_BAD_ATTEMPTS` | Failed tries before a broken event is marked `dead`. Redis outages are never counted (optional, default: `5`) |
 | `OUTBOX_RETENTION_DAYS` | Days to keep `sent` events before they are deleted (optional, default: `7`) |
 | `TEST_DATABASE_URL` | Database used by the tests. Must end in `_test` (optional, default: `DATABASE_URL` with the database name `tasks_test`) |
+| `CONSUMER_GROUP` | Consumer group the worker joins (optional, default: `task-workers`) |
+| `CONSUMER_BLOCK_MS` | How long the worker waits for new events per read (optional, default: `5000`) |
+| `CONSUMER_BATCH_SIZE` | Max events read per pass (optional, default: `10`) |
+| `CONSUMER_SEEN_TTL_SECONDS` | How long a handled `event_id` is remembered for duplicate checks (optional, default: `86400`) |
+| `CONSUMER_MIN_IDLE_MS` | A pending event idle this long is taken over and retried (optional, default: `60000`) |
+| `CONSUMER_MAX_DELIVERIES` | Tries before a failing event goes to the dead-letter stream (optional, default: `3`) |
 | `APP_PORT` | Host port for the API in Docker (default: `8010`) |
 
 Inside Docker Compose, `DATABASE_URL` and `REDIS_URL` are overridden to use the service names `db` and `redis`.
@@ -75,7 +82,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-This starts Postgres, Redis and the API. Database migrations run automatically before the server starts.
+This starts Postgres, Redis, the API and the stream worker. Database migrations run automatically before the server starts.
 
 | Resource | URL |
 |---|---|
@@ -90,6 +97,7 @@ Useful commands:
 ```bash
 docker compose ps              # check service status
 docker compose logs -f app     # follow API logs
+docker compose logs -f worker  # follow worker logs
 docker compose down            # stop services
 docker compose down -v         # stop services and delete the database volume
 ```
@@ -210,7 +218,7 @@ curl -X POST localhost:8010/tasks -H 'content-type: application/json' \
 
 ## Events
 
-Creating a task publishes a `task.created` event to the Redis Stream `events:tasks`. Only the producer exists so far; there are no consumers yet. Update and delete do not publish events.
+Creating a task publishes a `task.created` event to the Redis Stream `events:tasks`. A separate worker consumes these events (see [Consumer worker](#consumer-worker)). Update and delete do not publish events.
 
 The event goes through an **outbox**, so it is not lost when Redis is down:
 
@@ -255,6 +263,38 @@ Inspect the stream:
 ```bash
 docker compose exec redis redis-cli XRANGE events:tasks - +
 docker compose exec redis redis-cli XLEN events:tasks
+```
+
+## Consumer worker
+
+The worker is its own process (`python -m app.worker`, code in `app/consumer.py` and `app/worker.py`) and runs as the `worker` service in Docker Compose. It does not run inside the API.
+
+How it works:
+
+1. On start it creates the consumer group `task-workers` on `events:tasks` (starting at id `0`, so events published while the worker was stopped are still read). If the group already exists, that is fine.
+2. In a loop it first takes over events that another consumer read but never acknowledged for longer than `CONSUMER_MIN_IDLE_MS` (`XAUTOCLAIM`), then reads new events (`XREADGROUP`).
+3. For each event it checks `event_id` against a `seen:<event_id>` key in Redis. A known id is acknowledged without being handled again. Otherwise `handle_event` runs, the id is remembered for `CONSUMER_SEEN_TTL_SECONDS`, and the event is acknowledged (`XACK`).
+4. If `handle_event` raises, the error is logged and the event stays pending, so it is retried after the idle time. After `CONSUMER_MAX_DELIVERIES` tries it is copied to the dead-letter stream and acknowledged.
+5. Broken events (invalid JSON, missing `payload`, missing or empty `event_id` / `event_type`, or a type other than `task.created`) skip retries and go straight to the dead-letter stream.
+6. If Redis is unreachable the worker logs a warning and retries every 2 seconds. It never exits because Redis is down. On `SIGTERM` / `SIGINT` (for example `docker compose stop worker`) it finishes the current batch and exits.
+
+**At-least-once contract:** an event can reach `handle_event` more than once (for example if the worker crashes after handling but before acknowledging, or after the `seen:` key has expired). For now `handle_event` only writes a log line, so a repeat is harmless. If it later does something that must not be repeated (email, database write), make that action safe to repeat, for example by storing `event_id` in a database table in the same transaction.
+
+Dead-letter stream: `events:tasks:dead`. Each entry keeps the original fields (`event_type`, `payload`) plus `error` (the reason) and `original_id` (the id in `events:tasks`).
+
+```bash
+docker compose logs -f worker
+docker compose exec redis redis-cli XINFO GROUPS events:tasks
+docker compose exec redis redis-cli XPENDING events:tasks task-workers
+docker compose exec redis redis-cli XRANGE events:tasks:dead - +
+```
+
+The stream is trimmed to roughly `EVENT_STREAM_MAXLEN` entries. If the worker is stopped for long enough that unread events are trimmed, they are lost.
+
+Run the worker locally (with Redis running and `.env` set):
+
+```bash
+python -m app.worker
 ```
 
 ## Error Handling and Logging
@@ -310,6 +350,8 @@ app/
   database.py      engine and session dependency
   cache.py         Redis helpers (get / set / invalidate / list), Redis-failure safe
   events.py        add_to_outbox() saves an event in the caller's transaction
+  consumer.py      stream consumer: consumer group, duplicate check, retry, dead-letter
+  worker.py        worker entrypoint (python -m app.worker) with graceful shutdown
   outbox.py        relay_once() sends outbox events to the Redis Stream with retry, run_relay() loop, cleanup_sent()
   enums.py         TaskStatus enum
   exceptions.py    global error handlers
@@ -318,5 +360,5 @@ app/
   schemas/         ApiResponse with ok() / fail() helpers, TaskCreate/Update/Read, CacheEntry
   routers/         tasks, cache
 alembic/           database migrations
-tests/             pytest tests for the outbox and relay (use the tasks_test database)
+tests/             pytest tests for the outbox and relay (use the tasks_test database) and for the consumer and worker (fake Redis, no database needed)
 ```
