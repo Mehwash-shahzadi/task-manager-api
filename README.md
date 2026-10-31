@@ -1,219 +1,173 @@
 # Task Manager API
 
-A RESTful API for managing tasks, built with **FastAPI**, **SQLModel**, **PostgreSQL**, **Redis** and **Alembic**.
-
-## Table of Contents
-
-- [Features](#features)
-- [Tech Stack](#tech-stack)
-- [Configuration](#configuration)
-- [Getting Started with Docker](#getting-started-with-docker)
-- [Running Locally](#running-locally)
-- [API Reference](#api-reference)
-- [Database Migrations](#database-migrations)
-- [Project Structure](#project-structure)
+A task management REST API built with FastAPI, SQLModel, PostgreSQL and Redis. Creating a task also publishes a `task.created` event, which a separate worker consumes.
 
 ## Features
 
-- Full CRUD operations for tasks
-- Reusable `BaseTable` model (`id`, `created_at`, `updated_at`) and a single `TaskStatus` enum
-- Consistent `ApiResponse` format for every response, including errors
-- Redis caching for `GET /tasks` and `GET /tasks/{id}`, invalidated on create, update and delete
-- `GET /cache` endpoint to inspect cached keys (uses `SCAN`, limited to the `tasks:` prefix)
-- Alembic migrations generated from the models and applied automatically in Docker
+- CRUD endpoints for tasks
+- Redis caching for `GET /tasks` and `GET /tasks/{id}`. If Redis is down, the API falls back to the database
+- Same response format for every endpoint, including errors
+- `task.created` events saved to an outbox table in the same transaction as the task, then sent to a Redis Stream, so no event is lost if Redis is down
+- Worker process that reads the stream through a consumer group, skips duplicates, retries failures and moves broken events to a dead-letter stream
+- Request logging and an `X-Process-Time` header
+- Alembic migrations, applied automatically in Docker
 
-## Tech Stack
-
-| Component | Technology |
-|---|---|
-| Web framework | FastAPI |
-| ORM / models | SQLModel |
-| Database | PostgreSQL 16 |
-| Cache | Redis 7 |
-| Migrations | Alembic |
-| Containerization | Docker, Docker Compose |
-
-## Configuration
-
-Settings are read from environment variables (`.env`). Create the file from the template:
-
-```bash
-cp .env.example .env
-```
-
-| Variable | Description |
-|---|---|
-| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Credentials for the Postgres container |
-| `DATABASE_URL` | Database connection string when running the app locally (default: `localhost:5433`) |
-| `REDIS_URL` | Redis connection string when running the app locally (default: `localhost:6379`) |
-| `CACHE_TTL` | Cache expiry in seconds (default: `60`) |
-| `APP_PORT` | Host port for the API in Docker (default: `8010`) |
-
-Inside Docker Compose, `DATABASE_URL` and `REDIS_URL` are overridden to use the service names `db` and `redis`.
-
-## Getting Started with Docker
-
-Run all commands from the project root.
+## Setup
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
 
-This starts Postgres, Redis and the API. Database migrations run automatically before the server starts.
+This starts Postgres, Redis, the API and the worker. Migrations run before the API starts.
 
-| Resource | URL |
+| Service | URL |
 |---|---|
 | API | http://localhost:8010 |
-| Interactive docs (Swagger UI) | http://localhost:8010/docs |
-| Cache entries | http://localhost:8010/cache |
-
-The cache is empty until you call `GET /tasks` or `GET /tasks/{id}`.
-
-Useful commands:
+| Swagger docs | http://localhost:8010/docs |
+| Cached keys | http://localhost:8010/cache |
 
 ```bash
-docker compose ps              # check service status
-docker compose logs -f app     # follow API logs
-docker compose down            # stop services
-docker compose down -v         # stop services and delete the database volume
+docker compose logs -f app      # API logs
+docker compose logs -f worker   # worker logs
+docker compose down             # stop (add -v to delete the database)
 ```
 
-### Troubleshooting
+If a port is already in use, stop the other process or change `APP_PORT` in `.env`.
 
-- **Port conflicts:** the API is published on `APP_PORT` (default `8010`), Postgres on `5433` and Redis on `6379`. If another process or Docker stack already uses these ports, stop it or change the values in `.env`. Use `docker ps` to see running containers.
-- **Standalone containers:** if you started the local-development containers described below, stop them first: `docker stop task-manager-db task-manager-redis`.
+## Configuration
 
-## Running Locally
+Settings come from `.env`. The main ones:
 
-Run the app on your machine with Postgres and Redis in Docker. Execute everything from the project root so `.env` is found.
+| Variable | Description | Default |
+|---|---|---|
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Postgres credentials | see `.env.example` |
+| `DATABASE_URL`, `REDIS_URL` | Connection strings for running the app locally (Docker overrides them) | localhost |
+| `CACHE_TTL` | Cache expiry in seconds | `60` |
+| `APP_PORT` | API port on the host | `8010` |
+| `EVENT_STREAM` | Stream that events go to | `events:tasks` |
+| `CONSUMER_GROUP` | Consumer group used by the worker | `task-workers` |
+| `CONSUMER_MAX_DELIVERIES` | Tries before an event goes to the dead-letter stream | `3` |
 
-**1. Create `.env`**
+The outbox and consumer have more optional settings (poll interval, batch size, retention and so on). They are all in `app/config.py` with defaults.
 
-```bash
-cp .env.example .env
-```
+## API
 
-**2. Create a virtual environment and install dependencies**
+| Method | Path | Description |
+|---|---|---|
+| POST | `/tasks` | Create a task (publishes `task.created`) |
+| GET | `/tasks` | List tasks |
+| GET | `/tasks/{id}` | Get one task |
+| PUT | `/tasks/{id}` | Update a task |
+| DELETE | `/tasks/{id}` | Delete a task |
+| GET | `/cache` | Show cached keys |
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-**3. Start Postgres** (host port `5433`, to avoid clashing with a local Postgres on `5432`)
-
-```bash
-docker run -d --name task-manager-db \
-  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=tasks \
-  -p 5433:5432 -v task_manager_pgdata:/var/lib/postgresql/data \
-  postgres:16-alpine
-```
-
-Verify it is ready:
-
-```bash
-docker exec task-manager-db pg_isready -U postgres -d tasks
-```
-
-The matching URL in `.env`:
-
-```
-DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5433/tasks
-```
-
-On later runs, start it with `docker start task-manager-db`.
-
-**4. Apply the migration** (creates the `task` table)
-
-```bash
-alembic upgrade head
-```
-
-**5. Start Redis** (required for caching)
-
-```bash
-docker run -d --name task-manager-redis -p 6379:6379 redis:7-alpine
-```
-
-**6. Start the API**
-
-```bash
-uvicorn app.main:app --reload --port 8010
-```
-
-### Inspecting the database
-
-```bash
-docker exec task-manager-db psql -U postgres -d tasks -c '\dt'
-docker exec task-manager-db psql -U postgres -d tasks -c '\d task'
-docker exec task-manager-db psql -U postgres -d tasks -c 'SELECT * FROM task;'
-```
-
-### Stopping and resetting
-
-```bash
-docker stop task-manager-db task-manager-redis
-docker rm -f task-manager-db && docker volume rm task_manager_pgdata   # wipe the database
-```
-
-To use your own Postgres or Redis instead of Docker, change `DATABASE_URL` / `REDIS_URL` in `.env`.
-
-## API Reference
-
-| Method | Path | Description | Success code |
-|---|---|---|---|
-| POST | `/tasks` | Create a task | 201 |
-| GET | `/tasks` | List tasks (cached) | 200 |
-| GET | `/tasks/{id}` | Get a single task (cached) | 200 |
-| PUT | `/tasks/{id}` | Update a task | 200 |
-| DELETE | `/tasks/{id}` | Delete a task | 200 |
-| GET | `/cache` | View cached entries | 200 |
-
-Errors return the appropriate HTTP status: `404` (not found), `422` (validation error) and `500` (unexpected error).
-
-### Response format
+`status` is `pending` (default), `in_progress` or `done`. Errors return `404`, `422` or `500`.
 
 ```json
 { "success": true, "message": "Task created", "data": { "id": "..." }, "errors": null }
-{ "success": false, "message": "Task not found", "data": null, "errors": ["Task not found"] }
 ```
-
-### Task status
-
-`status` is one of `pending` (default), `in_progress` or `done`.
-
-### Example
 
 ```bash
 curl -X POST localhost:8010/tasks -H 'content-type: application/json' \
   -d '{"title": "Write docs", "status": "in_progress"}'
 ```
 
-## Database Migrations
+## Events
 
-The initial migration in `alembic/versions/` was generated from the models. After changing a model:
+Only task creation publishes an event.
+
+1. `POST /tasks` saves the task and an `outbox_event` row in one transaction. The request never talks to Redis for events.
+2. A background relay (`app/outbox.py`) sends pending rows to the `events:tasks` stream. If Redis is down, it keeps retrying with a growing delay (2s up to 60s).
+3. If an event itself is broken, it is marked `dead` after a few tries and does not block the others.
+
+Delivery is at-least-once, so the same event can arrive twice. The worker handles this with the `event_id`.
+
+Each stream entry has two fields: `event_type` and `payload` (a JSON string with the task details).
+
+## Worker
+
+The worker runs as its own service (`python -m app.worker`). For each event it:
+
+1. Reads it through the consumer group `task-workers`.
+2. Skips it if the `event_id` was already handled.
+3. Handles it (currently it only logs the event) and acknowledges it.
+4. Retries it if handling fails. After `CONSUMER_MAX_DELIVERIES` tries it moves to the dead-letter stream `events:tasks:dead`.
+
+Invalid events (bad JSON, missing `event_id` or `event_type`, unknown type) skip the retries and go straight to the dead-letter stream. Each dead-letter entry has the original fields plus `error` and `original_id`.
+
+## Checking events with RedisInsight
+
+Install [RedisInsight](https://redis.io/insight/) (desktop app) and add a database with host `localhost` and port `6379`. Redis is already exposed by `docker-compose.yml`, so nothing else is needed.
+
+- **Browser** tab: open `events:tasks` to see each event with its `event_type` and `payload`. Open `events:tasks:dead` for failed events (they also have `error` and `original_id`).
+- **Consumer Groups** tab on `events:tasks`: shows the group `task-workers`, its consumers and pending events.
+- **Workbench** tab runs Redis commands:
+
+```
+XREVRANGE events:tasks + - COUNT 5      # latest events
+XRANGE events:tasks:dead - +            # failed events
+XINFO GROUPS events:tasks               # consumer group status
+XPENDING events:tasks task-workers      # read but not yet acknowledged
+```
+
+Events the relay could not send are marked `dead` in the database:
+
+```bash
+docker compose exec db psql -U postgres -d tasks -c "select event_type, status, last_error from outbox_event where status='dead';"
+```
+
+Do not set a TTL on a stream key in RedisInsight. Redis deletes the whole stream when it expires.
+
+## Running locally
+
+Start Postgres and Redis (for example `docker compose up -d db redis`), then:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.main:app --reload --port 8010
+python -m app.worker        # in a second terminal
+```
+
+## Migrations
+
+After changing a model:
 
 ```bash
 alembic revision --autogenerate -m "describe change"
 alembic upgrade head
 ```
 
-Always review the generated migration file before committing it.
+Review the generated file before committing it.
 
-## Project Structure
+## Tests
+
+Tests use a separate database whose name must end in `_test`:
+
+```bash
+docker compose exec db psql -U postgres -c "create database tasks_test;"
+pip install -r requirements-dev.txt
+pytest
+```
+
+## Project structure
 
 ```
 app/
-  main.py          application, routers and exception handlers
-  config.py        settings loaded from the environment
-  database.py      engine and session dependency
-  cache.py         Redis helpers (get / set / invalidate)
-  enums.py         TaskStatus enum
-  exceptions.py    global error handlers
-  models/          BaseTable, Task
-  schemas/         ApiResponse, TaskCreate/Update/Read, CacheEntry
-  routers/         tasks, cache
-alembic/           database migrations
+  main.py         app setup, middleware, routers, logging
+  config.py       settings
+  cache.py        Redis cache helpers
+  events.py       saves events to the outbox
+  outbox.py       relay that sends outbox events to the stream
+  consumer.py     stream consumer (dedupe, retry, dead-letter)
+  worker.py       worker entrypoint
+  exceptions.py   error handlers
+  middleware.py   request logging and timing
+  models/         database models
+  schemas/        request and response schemas
+  routers/        tasks and cache endpoints
+alembic/          migrations
+tests/            tests
 ```

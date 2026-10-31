@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
-from app.schemas.response import ApiResponse
+from app.schemas.response import fail
 
 
 logger = logging.getLogger(__name__)
@@ -18,12 +18,7 @@ async def http_exception_handler(
 ):
     message = str(exc.detail)
 
-    response = ApiResponse[None](
-        success=False,
-        message=message,
-        data=None,
-        errors=[message],
-    )
+    response = fail(message, [message])
 
     return JSONResponse(
         status_code=exc.status_code,
@@ -41,12 +36,7 @@ async def validation_exception_handler(
         for error in exc.errors()
     ]
 
-    response = ApiResponse[None](
-        success=False,
-        message="Validation error",
-        data=None,
-        errors=errors,
-    )
+    response = fail("Validation error", errors)
 
     return JSONResponse(
         status_code=422,
@@ -66,12 +56,7 @@ async def general_exception_handler(
         exc_info=(type(exc), exc, exc.__traceback__),
     )
 
-    response = ApiResponse[None](
-        success=False,
-        message="Internal server error",
-        data=None,
-        errors=["An unexpected error occurred"],
-    )
+    response = fail("Internal server error", ["An unexpected error occurred"])
 
     return JSONResponse(
         status_code=500,
