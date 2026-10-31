@@ -1,0 +1,555 @@
+<title>Outbox and Retry Guide</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one calm reading column, with a wider live demo in the middle and code blocks that scroll sideways on their own. */
+:root {
+  --bg: #f6f7fa;
+  --surface: #ffffff;
+  --fg: #1b2233;
+  --muted: #5b6579;
+  --line: #dde1ea;
+  --accent: #2b4acb;
+  --accent-soft: #e6ebfc;
+  --ok: #17803d;
+  --ok-soft: #e0f3e7;
+  --wait: #a35a00;
+  --wait-soft: #fdf0d9;
+  --bad: #c0282d;
+  --bad-soft: #fde6e6;
+  --code-bg: #141a2b;
+  --code-fg: #e3e8f6;
+  --code-mute: #8b96b3;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1422; --surface: #171e31; --fg: #e6eaf5; --muted: #98a3bd; --line: #2a3350;
+    --accent: #8ea4ff; --accent-soft: #212c57;
+    --ok: #5ad48a; --ok-soft: #12351f; --wait: #f0b45a; --wait-soft: #3a2a0e; --bad: #ff8084; --bad-soft: #3e1a1c;
+    --code-bg: #0a0e1a; --code-fg: #dfe5f5; --code-mute: #7f8aa8;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1422; --surface: #171e31; --fg: #e6eaf5; --muted: #98a3bd; --line: #2a3350;
+  --accent: #8ea4ff; --accent-soft: #212c57;
+  --ok: #5ad48a; --ok-soft: #12351f; --wait: #f0b45a; --wait-soft: #3a2a0e; --bad: #ff8084; --bad-soft: #3e1a1c;
+  --code-bg: #0a0e1a; --code-fg: #dfe5f5; --code-mute: #7f8aa8;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.65;
+  padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 56px; }
+.wide { max-width: 980px; margin: 0 auto; width: 100%; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.15; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); }
+h2 { font-size: 1.65rem; }
+h3 { font-size: 1.1rem; }
+p { margin: 0; max-width: 65ch; }
+section { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.eyebrow { font-size: .75rem; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+.lead { font-size: 1.12rem; color: var(--muted); }
+code { font-family: var(--font-mono); font-size: .88em; background: var(--accent-soft); padding: 1px 6px; border-radius: 4px; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* code blocks */
+.code { border-radius: 10px; background: var(--code-bg); overflow: hidden; min-width: 0; }
+.code-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-bottom: 1px solid #ffffff1a; font-family: var(--font-mono); font-size: .78rem; color: var(--code-mute); }
+.code pre { margin: 0; padding: 16px; overflow-x: auto; font-family: var(--font-mono); font-size: .82rem; line-height: 1.6; color: var(--code-fg); }
+.code .c { color: var(--code-mute); }
+.code .add { background: #2fb36a26; display: inline-block; width: 100%; }
+.code .del { background: #e5484d2b; display: inline-block; width: 100%; }
+button { font: inherit; cursor: pointer; }
+.copy { background: transparent; color: var(--code-fg); border: 1px solid #ffffff33; border-radius: 6px; padding: 3px 10px; font-size: .75rem; font-family: var(--font-body); }
+.copy:hover { background: #ffffff1a; }
+
+/* story + concept cards */
+.story { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+.story ol { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.pair > div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tag { font-size: .72rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; align-self: flex-start; }
+.tag.ok { color: var(--ok); background: var(--ok-soft); }
+.tag.wait { color: var(--wait); background: var(--wait-soft); }
+.tag.bad { color: var(--bad); background: var(--bad-soft); }
+
+/* flow diagram */
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+.flow .box { flex: 1 1 130px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; font-size: .88rem; min-width: 0; }
+.flow .box b { display: block; font-family: var(--font-display); font-size: .98rem; }
+.flow .box.hot { border-color: var(--accent); background: var(--accent-soft); }
+.flow .arrow { align-self: center; color: var(--muted); font-family: var(--font-mono); }
+
+/* table */
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; background: var(--surface); border: 1px solid var(--line); }
+th, td { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+th { font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+
+/* demo */
+.demo { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 8px; padding: 8px 14px; font-weight: 500; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+:root[data-theme="dark"] .btn.primary { color: #0f1422; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.primary { color: #0f1422; } }
+.switch { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.switch label { padding: 8px 12px; cursor: pointer; font-size: .9rem; background: var(--bg); }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch input:checked + span { color: var(--accent); font-weight: 600; }
+.switch label:has(input:checked) { background: var(--accent-soft); }
+.switch label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.redis-state { margin-left: auto; font-weight: 600; font-size: .9rem; padding: 6px 12px; border-radius: 999px; }
+.redis-state.up { background: var(--ok-soft); color: var(--ok); }
+.redis-state.down { background: var(--bad-soft); color: var(--bad); }
+.stage { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.panel { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; display: flex; flex-direction: column; gap: 8px; min-height: 150px; }
+.panel h3 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-family: var(--font-body); font-weight: 600; }
+.row { display: flex; justify-content: space-between; gap: 8px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: .85rem; }
+.row small { color: var(--muted); font-family: var(--font-mono); font-size: .75rem; }
+.empty { color: var(--muted); font-size: .85rem; font-style: italic; }
+.log { font-family: var(--font-mono); font-size: .82rem; padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); min-height: 3.2em; }
+
+.note { border-left: 3px solid var(--wait); background: var(--wait-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; max-width: 65ch; }
+.steps { display: flex; flex-direction: column; gap: 28px; }
+.step { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.step h3 span { color: var(--accent); }
+ul.plain { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 8px; max-width: 65ch; }
+footer { color: var(--muted); font-size: .85rem; }
+@media (prefers-reduced-motion: no-preference) { .row { animation: pop .25s ease-out; } @keyframes pop { from { transform: translateY(-4px); opacity: .3; } } }
+</style>
+
+<div class="wrap">
+
+<header style="display:flex;flex-direction:column;gap:14px">
+  <div class="eyebrow">task-manager-api · events</div>
+  <h1>Do not lose events when Redis is down</h1>
+  <p class="lead">A step-by-step guide to the <b>outbox pattern</b> and <b>retry</b>, written for the code you already have in <code>app/events.py</code>.</p>
+</header>
+
+<!-- 1 -->
+<section>
+  <h2>What is going wrong today</h2>
+  <p>When you create a task, <code>create_task</code> saves it in Postgres, then calls <code>publish_event</code>. That function sends the event to a Redis Stream. Here is the important part of it:</p>
+  <div class="code"><div class="code-head"><span>app/events.py (current)</span></div><pre>try:
+    redis_client.xadd(settings.EVENT_STREAM, {...})
+except RedisError:
+    <span class="c"># the event is gone forever. Nobody will try again.</span>
+    logger.warning("Redis unavailable, %s event not published", event_type)</pre></div>
+  <p>So there are two ways to lose an event:</p>
+  <ul class="plain">
+    <li><b>Redis is down.</b> The task is saved, the warning is logged, and the event disappears.</li>
+    <li><b>The app crashes</b> after <code>session.commit()</code> but before <code>publish_event</code> runs. The task exists, the event never does.</li>
+  </ul>
+  <p>The comment in your file already says it: <i>"no outbox or retry"</i>. Let's add both.</p>
+</section>
+
+<!-- 2 -->
+<section>
+  <h2>The idea in a shop story</h2>
+  <div class="story">
+    <p>You run a small shop. After each sale you must call the delivery company. Sometimes their phone is busy.</p>
+    <p><b>Bad way:</b> make the call right away. If it is busy, you forget about it. The parcel never ships.</p>
+    <p><b>Good way:</b></p>
+    <ol>
+      <li>At the moment of the sale, write the delivery note in your <b>notebook</b>. Same pen, same moment, so the sale and the note can never be separated.</li>
+      <li>A helper reads the notebook and calls the delivery company.</li>
+      <li>If the phone is busy, the helper <b>waits a bit and calls again</b>. First 2 minutes, then 4, then 8.</li>
+      <li>When the call works, the helper ticks the note as done.</li>
+    </ol>
+  </div>
+  <div class="pair">
+    <div>
+      <span class="tag ok">Pattern 1</span>
+      <h3>Outbox = the notebook</h3>
+      <p>A table in your own database. When you save a task, you also save an "event to send" row in the <b>same transaction</b>. If the task is saved, the event row is saved. Always both, or neither.</p>
+    </div>
+    <div>
+      <span class="tag wait">Pattern 2</span>
+      <h3>Retry = call again later</h3>
+      <p>A background helper (the <b>relay</b>) reads pending rows and sends them to Redis. If Redis fails, it waits longer each time and tries again. Nothing is deleted until the send works.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 3 -->
+<section>
+  <h2>The new flow</h2>
+  <div class="flow">
+    <div class="box hot"><b>1. API request</b>POST /tasks</div>
+    <div class="arrow">→</div>
+    <div class="box hot"><b>2. One commit</b>task row + outbox row in Postgres</div>
+    <div class="arrow">→</div>
+    <div class="box"><b>3. Relay</b>background loop, every 2 seconds</div>
+    <div class="arrow">→</div>
+    <div class="box"><b>4. Redis Stream</b>XADD, then mark row "sent"</div>
+  </div>
+  <p>The request never talks to Redis any more. It only talks to Postgres, which you already trust. If Redis is down, the rows just wait in the table until Redis comes back.</p>
+
+  <h3>How long does the relay wait between tries?</h3>
+  <p>Each failure doubles the wait, up to a limit of 60 seconds. This is called <b>exponential backoff</b>. It stops you from hammering a Redis that is already struggling.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Failed tries</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6+</th></tr></thead>
+    <tbody><tr><td>Wait before next try</td><td>2s</td><td>4s</td><td>8s</td><td>16s</td><td>32s</td><td>60s</td></tr></tbody>
+  </table></div>
+  <p>Formula used in the code: <code>min(2 ** attempts, 60)</code> seconds.</p>
+</section>
+
+<!-- 4 demo -->
+<section class="wide">
+  <h2>Try it yourself</h2>
+  <p>Switch Redis off, create a few tasks, then switch it back on. Do this once in each mode and watch what happens to the events.</p>
+  <div class="demo">
+    <div class="controls">
+      <div class="switch" role="radiogroup" aria-label="Mode">
+        <label><input type="radio" name="mode" value="direct"><span>Direct publish (today)</span></label>
+        <label><input type="radio" name="mode" value="outbox" checked><span>Outbox + retry</span></label>
+      </div>
+      <button class="btn primary" id="b-create" type="button">Create task</button>
+      <button class="btn" id="b-redis" type="button">Turn Redis off</button>
+      <button class="btn" id="b-relay" type="button">Run relay once</button>
+      <button class="btn" id="b-reset" type="button">Reset</button>
+      <span class="redis-state up" id="redis-state">Redis is UP</span>
+    </div>
+    <div class="stage">
+      <div class="panel"><h3>Postgres: task</h3><div id="p-tasks"></div></div>
+      <div class="panel"><h3>Postgres: outbox_event</h3><div id="p-outbox"></div></div>
+      <div class="panel"><h3>Redis Stream</h3><div id="p-stream"></div></div>
+    </div>
+    <div class="log" id="log" aria-live="polite">Pick a mode and press "Create task".</div>
+  </div>
+  <p style="margin-top:12px;color:var(--muted);font-size:.9rem">In the real app the relay runs by itself every 2 seconds. Here you press the button so you can see each step.</p>
+</section>
+
+<!-- 5 apply -->
+<section>
+  <h2>Apply it in your code</h2>
+  <p>Six small steps. Each one shows the file to change. Lines on a green background are new; lines on a red background are removed.</p>
+  <div class="steps">
+
+    <div class="step">
+      <h3><span>Step 1.</span> Add the outbox table model</h3>
+      <p>New file. It is the "notebook". Each row is one event waiting to be sent.</p>
+      <div class="code"><div class="code-head"><span>app/models/outbox.py (new)</span><button class="copy" type="button">Copy</button></div><pre>from datetime import datetime
+from typing import Any
+
+from sqlalchemy import JSON, Column, DateTime
+from sqlmodel import Field
+
+from .base import BaseTable, current_time
+
+PENDING = "pending"
+SENT = "sent"
+DEAD = "dead"  <span class="c"># gave up after too many tries; needs a human</span>
+
+
+class OutboxEvent(BaseTable, table=True):
+    __tablename__ = "outbox_event"
+
+    event_type: str
+    payload: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    status: str = Field(default=PENDING, index=True)
+    attempts: int = 0
+    last_error: str | None = None
+    next_attempt_at: datetime = Field(
+        default_factory=current_time, sa_type=DateTime(timezone=True)
+    )
+    sent_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))</pre></div>
+      <p>Then register it so Alembic can see it:</p>
+      <div class="code"><div class="code-head"><span>app/models/__init__.py</span></div><pre>from .task import Task
+<span class="add">from .outbox import OutboxEvent</span></pre></div>
+      <p>Create and apply the migration (Docker applies it for you on start):</p>
+      <div class="code"><div class="code-head"><span>terminal</span><button class="copy" type="button">Copy</button></div><pre>alembic revision --autogenerate -m "add outbox_event"
+alembic upgrade head</pre></div>
+    </div>
+
+    <div class="step">
+      <h3><span>Step 2.</span> Add three settings</h3>
+      <div class="code"><div class="code-head"><span>app/config.py</span></div><pre>    REDIS_TIMEOUT: float = 1.0
+<span class="add">    OUTBOX_POLL_SECONDS: float = 2.0     # how often the relay looks at the table</span>
+<span class="add">    OUTBOX_BATCH_SIZE: int = 50          # rows handled per look</span>
+<span class="add">    OUTBOX_MAX_ATTEMPTS: int = 20        # after this the row becomes "dead"</span></pre></div>
+    </div>
+
+    <div class="step">
+      <h3><span>Step 3.</span> Change <code>events.py</code>: write to the table, do not call Redis</h3>
+      <p><code>add_to_outbox</code> only adds a row to the session. It does <b>not</b> commit. The caller commits, so the task and the event go in together. The <code>event_id</code> is created here, once, so every retry sends the same id.</p>
+      <div class="code"><div class="code-head"><span>app/events.py</span><button class="copy" type="button">Copy</button></div><pre>from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+<span class="del">import json</span>
+<span class="del">import logging</span>
+<span class="del">from redis import RedisError</span>
+<span class="del">from app.cache import redis_client</span>
+<span class="del">from app.config import settings</span>
+<span class="add">from sqlmodel import Session</span>
+<span class="add">from app.models.outbox import OutboxEvent</span>
+
+EVENT_SOURCE = "task-manager-api"
+
+
+<span class="add">def add_to_outbox(session: Session, event_type: str, data: dict[str, Any]) -&gt; None:</span>
+<span class="add">    event = {</span>
+<span class="add">        "event_id": str(uuid4()),</span>
+<span class="add">        "event_type": event_type,</span>
+<span class="add">        "occurred_at": datetime.now(timezone.utc).isoformat(),</span>
+<span class="add">        "source": EVENT_SOURCE,</span>
+<span class="add">        "data": data,</span>
+<span class="add">    }</span>
+<span class="add">    session.add(OutboxEvent(event_type=event_type, payload=event))  # no commit here</span></pre></div>
+      <p>The old <code>publish_event</code> function goes away. Its <code>xadd</code> call moves into the relay (step 4).</p>
+    </div>
+
+    <div class="step">
+      <h3><span>Step 4.</span> Write the relay with retry</h3>
+      <p>New file. <code>relay_once()</code> picks pending rows that are due, sends each to Redis, and either marks them sent or schedules the next try.</p>
+      <div class="code"><div class="code-head"><span>app/outbox.py (new)</span><button class="copy" type="button">Copy</button></div><pre>import json
+import logging
+import threading
+from datetime import timedelta
+
+from redis import RedisError
+from sqlmodel import Session, select
+
+from app.cache import redis_client
+from app.config import settings
+from app.database import engine
+from app.models.base import current_time
+from app.models.outbox import DEAD, PENDING, SENT, OutboxEvent
+
+logger = logging.getLogger(__name__)
+
+
+def backoff_seconds(attempts: int) -&gt; int:
+    return min(2 ** attempts, 60)  <span class="c"># 2, 4, 8, 16, 32, 60, 60 ...</span>
+
+
+def relay_once() -&gt; int:
+    """Send due events to Redis. Returns how many were sent."""
+    sent = 0
+    with Session(engine) as session:
+        rows = session.exec(
+            select(OutboxEvent)
+            .where(OutboxEvent.status == PENDING)
+            .where(OutboxEvent.next_attempt_at &lt;= current_time())
+            .order_by(OutboxEvent.created_at)
+            .limit(settings.OUTBOX_BATCH_SIZE)
+            .with_for_update(skip_locked=True)  <span class="c"># two workers never take the same row</span>
+        ).all()
+
+        for row in rows:
+            try:
+                redis_client.xadd(
+                    settings.EVENT_STREAM,
+                    {"event_type": row.event_type, "payload": json.dumps(row.payload)},
+                    maxlen=settings.EVENT_STREAM_MAXLEN,
+                    approximate=True,
+                )
+            except RedisError as exc:
+                row.attempts += 1
+                row.last_error = str(exc)[:500]
+                if row.attempts &gt;= settings.OUTBOX_MAX_ATTEMPTS:
+                    row.status = DEAD
+                    logger.error("Outbox event %s is dead: %s", row.id, exc)
+                else:
+                    row.next_attempt_at = current_time() + timedelta(
+                        seconds=backoff_seconds(row.attempts)
+                    )
+                session.add(row)
+                break  <span class="c"># Redis is down: stop here, do not hammer it with the rest</span>
+
+            row.status = SENT
+            row.sent_at = current_time()
+            session.add(row)
+            sent += 1
+
+        session.commit()  <span class="c"># one commit per batch keeps the row locks until the end</span>
+    return sent
+
+
+def run_relay(stop: threading.Event) -&gt; None:
+    while not stop.wait(settings.OUTBOX_POLL_SECONDS):
+        try:
+            relay_once()
+        except Exception:
+            logger.exception("Outbox relay crashed, will try again")</pre></div>
+    </div>
+
+    <div class="step">
+      <h3><span>Step 5.</span> Start the relay with the app</h3>
+      <p>FastAPI's <code>lifespan</code> runs code on start and on stop. We start the loop in a background thread there.</p>
+      <div class="code"><div class="code-head"><span>app/main.py</span><button class="copy" type="button">Copy</button></div><pre><span class="add">import threading</span>
+<span class="add">from contextlib import asynccontextmanager</span>
+import logging
+...
+<span class="add">from app.outbox import run_relay</span>
+
+<span class="add">@asynccontextmanager</span>
+<span class="add">async def lifespan(app: FastAPI):</span>
+<span class="add">    stop = threading.Event()</span>
+<span class="add">    thread = threading.Thread(target=run_relay, args=(stop,), daemon=True)</span>
+<span class="add">    thread.start()</span>
+<span class="add">    yield</span>
+<span class="add">    stop.set()</span>
+<span class="add">    thread.join(timeout=5)</span>
+
+<span class="del">app = FastAPI(title="Task Manager API")</span>
+<span class="add">app = FastAPI(title="Task Manager API", lifespan=lifespan)</span></pre></div>
+    </div>
+
+    <div class="step">
+      <h3><span>Step 6.</span> Use the outbox inside <code>create_task</code></h3>
+      <p>Two small changes: add the outbox row <i>before</i> the commit, and drop the old direct call. <code>flush()</code> sends the task to the database without committing, so we can use its data.</p>
+      <div class="code"><div class="code-head"><span>app/routers/tasks.py</span><button class="copy" type="button">Copy</button></div><pre><span class="del">from app.events import publish_event</span>
+<span class="add">from app.events import add_to_outbox</span>
+...
+def create_task(task_data: TaskCreate, session: SessionDep):
+    task = Task.model_validate(task_data)
+
+    session.add(task)
+<span class="add">    session.flush()</span>
+<span class="add">    add_to_outbox(</span>
+<span class="add">        session, "task.created", TaskRead.model_validate(task).model_dump(mode="json")</span>
+<span class="add">    )</span>
+    session.commit()          <span class="c"># task and event are saved together</span>
+    session.refresh(task)
+    cache_invalidate(LIST_KEY)
+<span class="del">    publish_event("task.created", TaskRead.model_validate(task).model_dump(mode="json"))</span>
+
+    return ok(task, "Task created")</pre></div>
+    </div>
+  </div>
+</section>
+
+<!-- 6 test -->
+<section>
+  <h2>Test it with a real Redis outage</h2>
+  <p>Your Compose file already has everything you need. The API runs on port 8010.</p>
+  <div class="code"><div class="code-head"><span>terminal</span><button class="copy" type="button">Copy</button></div><pre><span class="c"># 1. Stop Redis</span>
+docker compose pause redis
+
+<span class="c"># 2. Create a task. It should still return 201.</span>
+curl -X POST localhost:8010/tasks -H "Content-Type: application/json" \
+  -d '{"title": "Buy milk"}'
+
+<span class="c"># 3. The event waits in Postgres, with attempts going up</span>
+docker compose exec db psql -U postgres -d tasks \
+  -c "select event_type, status, attempts, next_attempt_at from outbox_event;"
+
+<span class="c"># 4. Bring Redis back</span>
+docker compose unpause redis
+
+<span class="c"># 5. Wait about a minute. The row turns "sent" and the stream has the event.</span>
+docker compose exec redis redis-cli XRANGE events:tasks - +</pre></div>
+  <p>If step 5 shows your <code>task.created</code> event, it works. Before the change, that stream would have been empty.</p>
+</section>
+
+<!-- 7 gotchas -->
+<section>
+  <h2>Things you should know</h2>
+  <ul class="plain">
+    <li><b>Duplicates can happen.</b> If Redis saved the event but the reply got lost, the relay sends it again. This is called <i>at-least-once</i> delivery. Every event has a fixed <code>event_id</code>, so whoever reads the stream should ignore ids it has already seen.</li>
+    <li><b>Events arrive a little later.</b> Up to 2 seconds in normal times, since the relay checks on a timer. That is the price for never losing them.</li>
+    <li><b>"Dead" rows need a human.</b> After 20 failed tries a row becomes <code>dead</code> and an error is logged. Watch for them with <code>select * from outbox_event where status = 'dead'</code>. After fixing Redis, set them back to <code>pending</code> to retry.</li>
+    <li><b>Several app workers are fine.</b> <code>skip_locked</code> makes each worker take different rows.</li>
+    <li><b>The table grows.</b> Plan to delete old <code>sent</code> rows now and then, for example anything older than 7 days.</li>
+    <li><b>Only create publishes an event today.</b> Update and delete do not. When you want <code>task.updated</code> or <code>task.deleted</code>, call <code>add_to_outbox</code> before their commit in the same way.</li>
+    <li><b>The cache is different.</b> Cache failures are fine to ignore, because the database is the real source. Events are not fine to ignore, which is why only events get an outbox.</li>
+  </ul>
+</section>
+
+<!-- 8 cheat -->
+<section>
+  <h2>Cheat sheet</h2>
+  <div class="pair">
+    <div><h3>Outbox</h3><p>Save the event in your database, in the same commit as the data. Never call Redis from the request.</p></div>
+    <div><h3>Relay</h3><p>A loop that reads pending rows and sends them to Redis. Marks them sent only after success.</p></div>
+    <div><h3>Retry</h3><p>On failure, wait <code>min(2 ** attempts, 60)</code> seconds and try again. Stop after a maximum and mark dead.</p></div>
+    <div><h3>Idempotency</h3><p>Same <code>event_id</code> on every retry, so readers can skip duplicates.</p></div>
+  </div>
+  <footer>Applies to branch <code>day1-middleware</code> of task-manager-api: files <code>app/events.py</code>, <code>app/routers/tasks.py</code>, <code>app/main.py</code>, <code>app/config.py</code>.</footer>
+</section>
+
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var s;
+  function reset() { s = { n: 0, redis: true, tasks: [], outbox: [], stream: [] }; say('Pick a mode and press "Create task".'); render(); }
+  function mode() { return document.querySelector('input[name="mode"]:checked').value; }
+  function say(t) { $('log').textContent = t; }
+  function row(left, right, color) {
+    return '<div class="row"><span>' + left + '</span><small' + (color ? ' style="color:var(--' + color + ')"' : '') + '>' + right + '</small></div>';
+  }
+  function render() {
+    var st = $('redis-state');
+    st.textContent = s.redis ? 'Redis is UP' : 'Redis is DOWN';
+    st.className = 'redis-state ' + (s.redis ? 'up' : 'down');
+    $('b-redis').textContent = s.redis ? 'Turn Redis off' : 'Turn Redis on';
+    $('p-tasks').innerHTML = s.tasks.length ? s.tasks.map(function (t) {
+      var map = { sent: ['event sent', 'ok'], lost: ['event LOST', 'bad'], waiting: ['event waiting', 'wait'] };
+      return row('Task #' + t.id, map[t.ev][0], map[t.ev][1]);
+    }).join('') : '<div class="empty">no tasks yet</div>';
+    $('p-outbox').innerHTML = mode() === 'direct'
+      ? '<div class="empty">not used in this mode</div>'
+      : (s.outbox.length ? s.outbox.map(function (o) {
+          var info = o.status === 'sent' ? 'sent' : (o.attempts ? 'tries: ' + o.attempts + ', next in ' + Math.min(Math.pow(2, o.attempts), 60) + 's' : 'pending');
+          return row('task.created #' + o.task.id, info, o.status === 'sent' ? 'ok' : 'wait');
+        }).join('') : '<div class="empty">empty</div>');
+    $('p-stream').innerHTML = s.stream.length ? s.stream.map(function (id) { return row('task.created #' + id, 'in stream', 'ok'); }).join('') : '<div class="empty">no events</div>';
+  }
+  $('b-create').onclick = function () {
+    var t = { id: ++s.n, ev: 'waiting' };
+    s.tasks.push(t);
+    if (mode() === 'direct') {
+      if (s.redis) { t.ev = 'sent'; s.stream.push(t.id); say('Task saved, then event sent to Redis. All good.'); }
+      else { t.ev = 'lost'; say('Task saved, Redis failed, warning logged. The event is gone and nobody will retry.'); }
+    } else {
+      s.outbox.push({ task: t, attempts: 0, status: 'pending' });
+      say('Task and outbox row saved in one commit. Redis is not touched. The relay will send it.');
+    }
+    render();
+  };
+  $('b-redis').onclick = function () { s.redis = !s.redis; say(s.redis ? 'Redis is back. In outbox mode, run the relay to send the waiting events.' : 'Redis is off. Try creating tasks now.'); render(); };
+  $('b-relay').onclick = function () {
+    if (mode() === 'direct') { say('There is no relay in direct mode. That is the problem.'); return; }
+    var pending = s.outbox.filter(function (o) { return o.status === 'pending'; });
+    if (!pending.length) { say('Relay: nothing waiting.'); return; }
+    var sent = 0;
+    for (var i = 0; i < pending.length; i++) {
+      var o = pending[i];
+      if (s.redis) { o.status = 'sent'; o.task.ev = 'sent'; s.stream.push(o.task.id); sent++; }
+      else { o.attempts++; say('Relay: Redis failed. Try ' + o.attempts + ' failed, will wait ' + Math.min(Math.pow(2, o.attempts), 60) + 's and try again. Stopped the batch.'); break; }
+    }
+    if (sent) say('Relay: sent ' + sent + ' event(s) to Redis and marked them sent. Nothing was lost.');
+    render();
+  };
+  $('b-reset').onclick = reset;
+  Array.prototype.forEach.call(document.querySelectorAll('input[name="mode"]'), function (r) { r.onchange = reset; });
+
+  Array.prototype.forEach.call(document.querySelectorAll('.copy'), function (b) {
+    b.onclick = function () {
+      var pre = b.closest('.code').querySelector('pre');
+      var text = pre.innerText;
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      try { navigator.clipboard.writeText(text).then(done, function () { selectIt(pre); }); } catch (e) { selectIt(pre); }
+    };
+  });
+  function selectIt(el) { var r = document.createRange(); r.selectNodeContents(el); var g = getSelection(); g.removeAllRanges(); g.addRange(r); }
+
+  reset();
+})();
+</script>
