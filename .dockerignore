@@ -4,3 +4,10 @@ __pycache__/
 *.pyc
 .env
 PLAN.md
+exports/
+tests/
+*.md
+/tasks/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
